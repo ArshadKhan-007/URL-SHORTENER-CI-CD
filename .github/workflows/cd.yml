@@ -26,17 +26,35 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Debug OIDC token claims
-        run: |
-          IDTOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
-          echo "$IDTOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq .
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
+
+      - name: Ensure ECS cluster exists
+        run: |
+          if ! aws ecs describe-clusters --clusters $ECS_CLUSTER --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
+            aws ecs create-cluster --cluster-name $ECS_CLUSTER
+          fi
+
+      - name: Ensure ECS service exists
+        run: |
+          STATUS=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --query 'services[0].status' --output text 2>/dev/null || echo "MISSING")
+          if [ "$STATUS" != "ACTIVE" ]; then
+            echo "Service not found, creating..."
+            aws ecs register-task-definition --cli-input-json file://$ECS_TASK_DEFINITION
+            aws ecs create-service \
+              --cluster $ECS_CLUSTER \
+              --service-name $ECS_SERVICE \
+              --task-definition $CONTAINER_NAME \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[${{ vars.SUBNET_ID }}],securityGroups=[${{ vars.SG_ID }}],assignPublicIp=ENABLED}"
+          else
+            echo "Service already exists, skipping creation."
+          fi
 
       - name: Fill in the new image ID in the Amazon ECS task definition
         id: task-def
